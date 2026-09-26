@@ -1,0 +1,24 @@
+# Render deployment configuration — Sentinel frontend (static site)
+# https://render.com/docs/static-sites
+#
+# Before deploying, set VITE_SENTINEL_API_URL in the Render dashboard
+# to point to your deployed backend URL, e.g.:
+#   https://sentinel-backend.onrender.com
+#
+# The frontend falls back to http://127.0.0.1:8000 when the variable
+# is not set — this preserves local development behaviour.
+#
+# NOTE: No _redirects file is required. The app uses state-based
+# navigation (no URL routing library), so all traffic is served from
+# a single index.html entry point.
+
+services:
+  - type: static
+    name: sentinel-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_SENTINEL_API_URL
+        # Do NOT hardcode the value here. Set it in the Render dashboard.
+        # sync: false tells render.yaml to leave the value unset by default.
+        sync: false
