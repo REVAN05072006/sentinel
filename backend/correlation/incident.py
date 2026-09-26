@@ -19,17 +19,38 @@ class Incident:
     destination_port: int | None = None
     protocol: str | None = None
 
-    detection_count: int = 0
+    detection_count: int = 1
+    observation_count: int = 1
     evidence: dict = field(default_factory=dict)
 
 
 class IncidentManager:
+    """
+    Groups repeated observations of the same threat into one incident.
+
+    detection_count represents distinct incident episodes.
+
+    observation_count represents repeated detector observations
+    received while the current incident remains active.
+    """
+
     def __init__(self, correlation_window: float = 5.0):
         self.correlation_window = correlation_window
         self._incidents: dict[str, Incident] = {}
         self._counter = 0
 
     def process(self, alert: ThreatAlert) -> Incident:
+        """
+        Process one threat alert.
+
+        If the same threat is observed again within the correlation
+        window, update the existing incident without incrementing
+        detection_count.
+
+        A new detection episode is created only after the previous
+        incident has expired.
+        """
+
         key = self._incident_key(alert)
 
         existing = self._incidents.get(key)
@@ -41,16 +62,38 @@ class IncidentManager:
 
             if elapsed <= self.correlation_window:
                 existing.last_seen = alert.timestamp
-                existing.detection_count += 1
+
+                existing.observation_count += 1
+
                 existing.confidence = max(
                     existing.confidence,
                     alert.confidence,
                 )
+
                 existing.severity = self._max_severity(
                     existing.severity,
                     alert.severity,
                 )
-                existing.evidence.update(alert.evidence)
+
+                existing.destination_ip = (
+                    alert.destination_ip
+                    or existing.destination_ip
+                )
+
+                existing.destination_port = (
+                    alert.destination_port
+                    if alert.destination_port is not None
+                    else existing.destination_port
+                )
+
+                existing.protocol = (
+                    alert.protocol
+                    or existing.protocol
+                )
+
+                existing.evidence.update(
+                    alert.evidence
+                )
 
                 return existing
 
@@ -67,6 +110,7 @@ class IncidentManager:
             destination_port=alert.destination_port,
             protocol=alert.protocol,
             detection_count=1,
+            observation_count=1,
             evidence=dict(alert.evidence),
         )
 
@@ -89,7 +133,10 @@ class IncidentManager:
         )
 
     @staticmethod
-    def _max_severity(first: str, second: str) -> str:
+    def _max_severity(
+        first: str,
+        second: str,
+    ) -> str:
         ranking = {
             "LOW": 1,
             "MEDIUM": 2,
@@ -99,6 +146,7 @@ class IncidentManager:
 
         return (
             first
-            if ranking.get(first, 0) >= ranking.get(second, 0)
+            if ranking.get(first, 0)
+            >= ranking.get(second, 0)
             else second
         )

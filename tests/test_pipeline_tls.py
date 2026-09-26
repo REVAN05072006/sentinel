@@ -73,8 +73,17 @@ packets = [
     ),
 ]
 
+for packet in packets:
+    pipeline.process_packet(packet)
 
-result = pipeline.process_packets(packets)
+tls_groups = pipeline.tls_tracker.get_groups()
+
+assert len(tls_groups) == 1
+
+tls_groups[0].client_fingerprint = "JA4-UNKNOWN"
+tls_groups[0].server_fingerprint = "JA4-SERVER"
+
+result = pipeline.process_packets([])
 
 assert len(result.alerts) == 1
 assert len(result.incidents) == 1
@@ -89,11 +98,11 @@ assert alert.destination_port == 443
 assert alert.protocol == "TLS"
 
 assert alert.confidence >= 0.75
-assert alert.severity == "HIGH"
+assert alert.severity == "CRITICAL"
 
 assert "high_packet_size_variability" in alert.evidence["signals"]
 assert "bursty_timing" in alert.evidence["signals"]
-assert "high_timing_variability" in alert.evidence["signals"]
+assert "suspicious_client_fingerprint" in alert.evidence["signals"]
 
 incident = result.incidents[0]
 
@@ -102,7 +111,7 @@ assert incident.destination_ip == "203.0.113.30"
 assert incident.destination_port == 443
 assert incident.protocol == "TLS"
 assert incident.confidence >= 0.75
-assert incident.severity == "HIGH"
+assert incident.severity == "CRITICAL"
 
 print("TLS PIPELINE TEST: PASSED")
 print("ACTIVE ALERTS:", len(result.alerts))

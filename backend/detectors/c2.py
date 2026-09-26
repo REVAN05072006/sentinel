@@ -1,7 +1,30 @@
+import ipaddress
 from datetime import datetime, timezone
 
 from backend.alerts.schema import ThreatAlert
 from backend.features.timing import TimingFeatureExtractor
+
+
+def _is_multicast_or_broadcast(ip: str) -> bool:
+    """
+    Return True for IPv4 addresses that are multicast or broadcast.
+
+    Covered ranges (RFC 1112, RFC 5771):
+        224.0.0.0/4   — all IPv4 multicast (includes 239.0.0.0/8)
+        255.255.255.255 — limited broadcast
+
+    These addresses are legitimate destinations for mDNS, SSDP, IGMP,
+    and other one-to-many protocols.  Periodic traffic to them is normal
+    OS/network behaviour and must not trigger C2 beaconing alerts.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+        return (
+            addr.is_multicast
+            or addr == ipaddress.ip_address("255.255.255.255")
+        )
+    except ValueError:
+        return False
 
 
 class C2BeaconDetector:
@@ -12,6 +35,10 @@ class C2BeaconDetector:
     Detection is based on temporal regularity and repeated
     communication with a destination. No payload inspection
     or active network interaction is performed.
+
+    Multicast and broadcast destinations (224.0.0.0/4, 255.255.255.255)
+    are excluded because periodic traffic to those addresses is normal
+    OS behaviour (mDNS, SSDP, IGMP) and does not constitute C2.
     """
 
     def __init__(
@@ -35,6 +62,14 @@ class C2BeaconDetector:
         destination_port: int,
         protocol: str,
     ) -> ThreatAlert | None:
+
+        # Multicast and broadcast addresses (224.0.0.0/4, 255.255.255.255)
+        # generate inherently periodic traffic for normal protocols such as
+        # mDNS, SSDP, and IGMP.  They are never legitimate C2 server
+        # destinations.  Skip without further scoring.
+        if _is_multicast_or_broadcast(destination_ip):
+            return None
+
         timing = TimingFeatureExtractor.extract(timestamps)
 
         if timing.observation_count < self.minimum_observations:

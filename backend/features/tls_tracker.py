@@ -31,6 +31,14 @@ class TLSTracker:
         optional fingerprints
 
     No encrypted payload is decrypted or inspected.
+
+    Bidirectional tracking: port 443/8443 is recognised as the
+    encrypted endpoint regardless of whether it appears as the
+    source port (server → client response) or the destination port
+    (client → server request).  Both directions are normalised onto
+    the same canonical (client_ip, server_ip, server_port, protocol)
+    session key so that a single TLSSessionGroup accumulates the
+    complete observed flow.
     """
 
     ENCRYPTED_PORTS = {443, 8443}
@@ -51,14 +59,31 @@ class TLSTracker:
         if (
             packet.src_ip is None
             or packet.dst_ip is None
-            or packet.dst_port is None
         ):
             return
 
-        if packet.dst_port not in self.ENCRYPTED_PORTS:
+        if packet.protocol not in {"TCP", "UDP"}:
             return
 
-        if packet.protocol not in {"TCP", "UDP"}:
+        # Determine which endpoint is the encrypted server.
+        # Prefer dst_port (client→server) over src_port (server→client)
+        # so that the two cases below are mutually exclusive.
+        if packet.dst_port in self.ENCRYPTED_PORTS:
+            # Client → Server direction (request / handshake)
+            client_ip = packet.src_ip
+            server_ip = packet.dst_ip
+            server_port = packet.dst_port
+            client_port = packet.src_port
+        elif (
+            packet.src_port is not None
+            and packet.src_port in self.ENCRYPTED_PORTS
+        ):
+            # Server → Client direction (response packets)
+            client_ip = packet.dst_ip
+            server_ip = packet.src_ip
+            server_port = packet.src_port
+            client_port = packet.dst_port
+        else:
             return
 
         protocol = (
@@ -67,25 +92,27 @@ class TLSTracker:
             else "TLS"
         )
 
+        # Canonical key: always from the client's perspective so that
+        # both traffic directions map to the same session group.
         key = (
-            packet.src_ip,
-            packet.dst_ip,
-            packet.dst_port,
+            client_ip,
+            server_ip,
+            server_port,
             protocol,
         )
 
         if self._groups[key] is None:
             self._groups[key] = TLSSessionGroup(
                 session_id=(
-                    f"{packet.src_ip}:"
-                    f"{packet.src_port}->"
-                    f"{packet.dst_ip}:"
-                    f"{packet.dst_port}/"
+                    f"{client_ip}:"
+                    f"{client_port}->"
+                    f"{server_ip}:"
+                    f"{server_port}/"
                     f"{protocol}"
                 ),
-                source_ip=packet.src_ip,
-                destination_ip=packet.dst_ip,
-                destination_port=packet.dst_port,
+                source_ip=client_ip,
+                destination_ip=server_ip,
+                destination_port=server_port,
                 protocol=protocol,
                 timestamps=[],
                 packet_sizes=[],

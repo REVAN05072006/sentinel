@@ -1,15 +1,32 @@
+from __future__ import annotations
+
 import os
 import tempfile
+import threading
+import time
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from backend.ingest.replay_engine import (
-    TrafficReplayEngine,
-)
-from backend.ingest.stream import PacketStream
+from backend.features.dns_features import DNSFeatureExtractor
+from backend.features.dns_tracker import DNSTracker
+from backend.features.tls_features import TLSFeatureExtractor
+from backend.features.tls_tracker import TLSTracker
 from backend.features.window import WindowFeatures
+from backend.ingest.live_capture import (
+    CaptureInterface,
+    LiveCaptureError,
+    LivePacketCapture,
+    list_capture_interfaces,
+)
+from backend.ingest.replay_engine import TrafficReplayEngine
+from backend.ingest.stream import PacketStream
+from backend.ingest.stream_processor import StreamingResult
 
 
 app = FastAPI(
@@ -28,13 +45,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATASET_PATH = Path(
-    "datasets/test_traffic.pcap"
-)
 
+DATASET_PATH = Path("datasets/test_traffic.pcap")
 
+# Existing replay processor.
 processor = TrafficReplayEngine()
 
+
+# ---------------------------------------------------------------------------
+# LIVE CAPTURE STATE
+# ---------------------------------------------------------------------------
+
+_live_lock = threading.RLock()
+_live_capture: LivePacketCapture | None = None
+_live_worker: threading.Thread | None = None
+_live_stop_event = threading.Event()
+
+_live_interface: CaptureInterface | None = None
+_live_started_at: float | None = None
+_live_last_result: StreamingResult | None = None
+_live_last_error: str | None = None
+_live_packets_processed = 0
+_live_processing_duration = 0.0
+
+
+class LiveStartRequest(BaseModel):
+    interface: str
+
+
+# ---------------------------------------------------------------------------
+# COMMON HELPERS
+# ---------------------------------------------------------------------------
 
 def make_normal_window(index: int) -> WindowFeatures:
     return WindowFeatures(
@@ -67,83 +108,162 @@ def _build_intelligence_response(final, metrics):
         intelligence.append(
             {
                 "source_ip": item.source_ip,
-                "threat_class": (
-                    item.threat_class
-                ),
-                "unified_score": (
-                    item.threat_score
-                    .unified_score
-                ),
-                "risk_level": (
-                    item.threat_score
-                    .risk_level
-                ),
-                "detector_score": (
-                    item.threat_score
-                    .detector_score
-                ),
-                "ml_score": (
-                    item.threat_score
-                    .ml_score
-                ),
-                "correlation_score": (
-                    item.threat_score
-                    .correlation_score
-                ),
-                "progression_score": (
-                    item.threat_score
-                    .progression_score
-                ),
-                "requires_alert": (
-                    item.risk_decision
-                    .requires_alert
-                ),
-                "rationale": (
-                    item.risk_decision
-                    .rationale
-                ),
+                "threat_class": item.threat_class,
+                "unified_score": item.threat_score.unified_score,
+                "risk_level": item.threat_score.risk_level,
+                "detector_score": item.threat_score.detector_score,
+                "ml_score": item.threat_score.ml_score,
+                "correlation_score": item.threat_score.correlation_score,
+                "progression_score": item.threat_score.progression_score,
+                "requires_alert": item.risk_decision.requires_alert,
+                "rationale": item.risk_decision.rationale,
             }
         )
 
     return {
-        "packets_processed": (
-            metrics.packets_processed
-        ),
-        "replay_duration_seconds": (
-            metrics.replay_duration
-        ),
-        "processing_duration_seconds": (
-            metrics.processing_duration
-        ),
-        "average_latency_ms": (
-            metrics.average_latency_ms
-        ),
-        "maximum_latency_ms": (
-            metrics.maximum_latency_ms
-        ),
-        "packets_per_second": (
-            metrics.packets_per_second
-        ),
-        "ml_anomaly_score": (
-            final.ml_anomaly_score
-        ),
-        "ml_is_anomaly": (
-            final.ml_is_anomaly
-        ),
-        "active_alerts": len(
-            final.active_alerts
-        ),
-        "correlated_chains": len(
-            final.correlated_evidence
-        ),
+        "packets_processed": metrics.packets_processed,
+        "replay_duration_seconds": metrics.replay_duration,
+        "processing_duration_seconds": metrics.processing_duration,
+        "average_latency_ms": metrics.average_latency_ms,
+        "maximum_latency_ms": metrics.maximum_latency_ms,
+        "packets_per_second": metrics.packets_per_second,
+        "ml_anomaly_score": final.ml_anomaly_score,
+        "ml_is_anomaly": final.ml_is_anomaly,
+        "active_alerts": len(final.active_alerts),
+        "correlated_chains": len(final.correlated_evidence),
         "intelligence": intelligence,
     }
 
 
+def _serialize(value: Any):
+    """
+    Convert Sentinel dataclasses/models/enums into JSON-safe data.
+    """
+    if value is None:
+        return None
+
+    if is_dataclass(value):
+        return jsonable_encoder(asdict(value))
+
+    return jsonable_encoder(value)
+
+
+def _serialize_live_result(result: StreamingResult | None):
+    if result is None:
+        return None
+
+    return {
+        "packet_timestamp": result.packet_timestamp,
+        "window_features": _serialize(result.window_features),
+        "new_alerts": _serialize(result.new_alerts),
+        "active_alerts": _serialize(result.active_alerts),
+        "correlated_evidence": _serialize(result.correlated_evidence),
+        "intelligence": _serialize(result.intelligence),
+        "ml_anomaly_score": result.ml_anomaly_score,
+        "ml_is_anomaly": result.ml_is_anomaly,
+    }
+
+
+def _serialize_dns_state(dns_tracker: DNSTracker) -> dict:
+    """
+    Flatten all observed DNS query groups into a list of DnsRecord-
+    compatible dicts for the frontend DNS Analysis page.
+
+    Only real observed metadata is returned.  Nothing is fabricated.
+    """
+    recent_queries: list[dict] = []
+
+    for group in dns_tracker.get_groups():
+        for ts, query in zip(group.timestamps, group.queries):
+            try:
+                features = DNSFeatureExtractor.extract(query)
+                entropy: float | None = features.entropy
+                query_length: int | None = features.query_length
+            except Exception:
+                entropy = None
+                query_length = len(query) if query else None
+
+            recent_queries.append(
+                {
+                    "source_ip": group.source_ip,
+                    "destination_ip": group.destination_ip,
+                    "query": query,
+                    "timestamp": ts,
+                    "query_length": query_length,
+                    "entropy": entropy,
+                }
+            )
+
+    # Keep the 200 most recent entries by timestamp.
+    recent_queries.sort(key=lambda x: x["timestamp"])
+
+    return {
+        "query_count": len(recent_queries),
+        "recent_queries": recent_queries[-200:],
+    }
+
+
+def _serialize_encrypted_sessions(tls_tracker: TLSTracker) -> dict:
+    """
+    Compute TLS/QUIC session features from the passive tracker groups
+    and return them as EncryptedSession-compatible dicts for the
+    frontend Encrypted Traffic page.
+
+    Only metadata (packet sizes, timestamps, endpoints) is used.
+    No payload is decrypted or inspected.
+    """
+    sessions: list[dict] = []
+
+    for group in tls_tracker.get_groups():
+        if not group.timestamps:
+            continue
+
+        try:
+            features = TLSFeatureExtractor.extract(
+                session_id=group.session_id,
+                timestamps=group.timestamps,
+                packet_sizes=group.packet_sizes,
+                client_fingerprint=group.client_fingerprint,
+                server_fingerprint=group.server_fingerprint,
+            )
+        except Exception:
+            continue
+
+        sessions.append(
+            {
+                "source_ip": group.source_ip,
+                "destination_ip": group.destination_ip,
+                "destination_port": group.destination_port,
+                "protocol": group.protocol,
+                "packet_count": features.packet_count,
+                "total_bytes": features.total_bytes,
+                "mean_packet_size": features.mean_packet_size,
+                "std_packet_size": features.packet_size_stddev,
+                "mean_interarrival": features.mean_interarrival,
+                "std_interarrival": features.interarrival_stddev,
+                "burstiness": features.burstiness,
+                "client_fingerprint": group.client_fingerprint,
+                "server_fingerprint": group.server_fingerprint,
+            }
+        )
+
+    return {
+        "encrypted_sessions": len(sessions),
+        "encrypted_packet_count": sum(
+            s["packet_count"] for s in sessions
+        ),
+        "sessions": sessions,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PCAP ANALYSIS
+# ---------------------------------------------------------------------------
+
 def _run_analysis(pcap_path: str):
     """
-    Core analysis logic: reset, refit baseline,
-    load packets, run replay, return formatted result.
+    Core analysis logic: reset, refit baseline, load packets,
+    run replay, return formatted result.
     """
     processor.processor.reset()
 
@@ -158,11 +278,9 @@ def _run_analysis(pcap_path: str):
         PacketStream(pcap_path).packets()
     )
 
-    results, metrics = (
-        processor.replay(
-            packets,
-            mode="maximum",
-        )
+    results, metrics = processor.replay(
+        packets,
+        mode="maximum",
     )
 
     if not results:
@@ -172,16 +290,199 @@ def _run_analysis(pcap_path: str):
         )
 
     final = results[-1]
-    return _build_intelligence_response(final, metrics)
 
+    return _build_intelligence_response(
+        final,
+        metrics,
+    )
+
+
+# ---------------------------------------------------------------------------
+# LIVE CAPTURE WORKER
+# ---------------------------------------------------------------------------
+
+def _live_worker_loop() -> None:
+    """
+    Drain packets from LivePacketCapture and process each packet through
+    the existing SentinelStreamProcessor.
+
+    No packet is transmitted, modified, probed, or decrypted.
+    """
+    global _live_last_result
+    global _live_last_error
+    global _live_packets_processed
+    global _live_processing_duration
+
+    while not _live_stop_event.is_set():
+
+        with _live_lock:
+            capture = _live_capture
+
+        if capture is None:
+            time.sleep(0.05)
+            continue
+
+        packets = capture.drain(limit=256)
+
+        if not packets:
+            time.sleep(0.01)
+            continue
+
+        for packet in packets:
+
+            if _live_stop_event.is_set():
+                break
+
+            packet_start = time.perf_counter()
+
+            try:
+                result = processor.processor.process_packet(
+                    packet
+                )
+
+                packet_end = time.perf_counter()
+
+                with _live_lock:
+                    _live_last_result = result
+                    _live_packets_processed += 1
+                    _live_processing_duration += (
+                        packet_end - packet_start
+                    )
+                    _live_last_error = None
+
+            except Exception as exc:
+                with _live_lock:
+                    _live_last_error = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+                # Do not kill the live worker because one malformed
+                # or unexpected packet caused an analytical exception.
+                continue
+
+
+def _reset_live_state() -> None:
+    global _live_last_result
+    global _live_last_error
+    global _live_packets_processed
+    global _live_processing_duration
+
+    _live_last_result = None
+    _live_last_error = None
+    _live_packets_processed = 0
+    _live_processing_duration = 0.0
+
+
+def _start_live_capture(interface: CaptureInterface) -> None:
+    global _live_capture
+    global _live_worker
+    global _live_interface
+    global _live_started_at
+
+    with _live_lock:
+
+        if _live_capture is not None and _live_capture.running:
+            raise HTTPException(
+                status_code=409,
+                detail="Live capture is already running.",
+            )
+
+        # Reset the analytical pipeline so live traffic starts with
+        # clean state rather than inheriting an old replay.
+        processor.processor.reset()
+
+        # Establish the trusted baseline before live scoring begins.
+        processor.processor.fit_baseline(
+            [
+                make_normal_window(index)
+                for index in range(30)
+            ]
+        )
+
+        _reset_live_state()
+
+        capture = LivePacketCapture(interface.name)
+
+        try:
+            capture.start()
+        except LiveCaptureError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=str(exc),
+            ) from exc
+
+        _live_capture = capture
+        _live_interface = interface
+        _live_started_at = time.time()
+
+        _live_stop_event.clear()
+
+        _live_worker = threading.Thread(
+            target=_live_worker_loop,
+            name="sentinel-live-worker",
+            daemon=True,
+        )
+
+        _live_worker.start()
+
+
+def _stop_live_capture() -> dict:
+    global _live_capture
+    global _live_worker
+    global _live_interface
+    global _live_started_at
+
+    with _live_lock:
+        capture = _live_capture
+        worker = _live_worker
+
+        _live_stop_event.set()
+
+    if worker is not None:
+        worker.join(timeout=2.0)
+
+    if capture is not None:
+        capture.stop()
+
+    with _live_lock:
+
+        captured = (
+            capture.captured
+            if capture is not None
+            else 0
+        )
+
+        dropped = (
+            capture.dropped
+            if capture is not None
+            else 0
+        )
+
+        processed = _live_packets_processed
+
+        _live_capture = None
+        _live_worker = None
+        _live_interface = None
+        _live_started_at = None
+
+    return {
+        "running": False,
+        "captured": captured,
+        "processed": processed,
+        "dropped": dropped,
+    }
+
+
+# ---------------------------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 def startup():
     """
-    Initialize the ML baseline from trusted normal
-    traffic before replay begins.
+    Initialize the ML baseline from trusted normal traffic before
+    replay or live processing begins.
     """
-
     processor.processor.fit_baseline(
         [
             make_normal_window(index)
@@ -189,6 +490,10 @@ def startup():
         ]
     )
 
+
+# ---------------------------------------------------------------------------
+# BASIC ENDPOINTS
+# ---------------------------------------------------------------------------
 
 @app.get("/")
 def root():
@@ -206,8 +511,7 @@ def health():
     return {
         "status": "healthy",
         "ml_ready": (
-            processor.processor.pipeline
-            .is_ml_ready()
+            processor.processor.pipeline.is_ml_ready()
         ),
     }
 
@@ -221,16 +525,217 @@ def status():
     evidence = pipeline.get_correlated_evidence()
     intelligence = pipeline.get_intelligence()
 
+    with _live_lock:
+        live_running = (
+            _live_capture is not None
+            and _live_capture.running
+        )
+
     return {
         "active_alerts": len(alerts),
         "incidents": len(incidents),
         "correlated_chains": len(evidence),
-        "intelligence_results": len(
-            intelligence
-        ),
+        "intelligence_results": len(intelligence),
         "ml_ready": pipeline.is_ml_ready(),
+        "live_capture": live_running,
     }
 
+
+# ---------------------------------------------------------------------------
+# CAPTURE INTERFACES
+# ---------------------------------------------------------------------------
+
+@app.get("/interfaces")
+def interfaces():
+    """
+    Return locally visible Npcap capture interfaces.
+
+    This is discovery only. No traffic is transmitted.
+    """
+    discovered = list_capture_interfaces()
+
+    return [
+        {
+            "name": item.name,
+            "address": item.address,
+            "display_name": item.display_name,
+        }
+        for item in discovered
+    ]
+
+
+# ---------------------------------------------------------------------------
+# LIVE CAPTURE API
+# ---------------------------------------------------------------------------
+
+@app.post("/live/start")
+def live_start(request: LiveStartRequest):
+    discovered = list_capture_interfaces()
+
+    selected = next(
+        (
+            item
+            for item in discovered
+            if item.name == request.interface
+        ),
+        None,
+    )
+
+    if selected is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Capture interface '{request.interface}' "
+                "was not found."
+            ),
+        )
+
+    _start_live_capture(selected)
+
+    return {
+        "status": "started",
+        "interface": {
+            "name": selected.name,
+            "address": selected.address,
+            "display_name": selected.display_name,
+        },
+        "mode": "passive",
+        "payload_decryption": False,
+        "active_mitigation": False,
+    }
+
+
+@app.get("/live/status")
+def live_status():
+    with _live_lock:
+
+        capture = _live_capture
+
+        running = (
+            capture is not None
+            and capture.running
+        )
+
+        captured = (
+            capture.captured
+            if capture is not None
+            else 0
+        )
+
+        dropped = (
+            capture.dropped
+            if capture is not None
+            else 0
+        )
+
+        processed = _live_packets_processed
+
+        started_at = _live_started_at
+
+        last_result = _live_last_result
+
+        last_error = _live_last_error
+
+        processing_duration = (
+            _live_processing_duration
+        )
+
+        interface = _live_interface
+
+    elapsed = (
+        max(time.time() - started_at, 0.0)
+        if started_at is not None
+        else 0.0
+    )
+
+    packets_per_second = (
+        processed / processing_duration
+        if processing_duration > 0
+        else 0.0
+    )
+
+    result_data = _serialize_live_result(last_result)
+
+    # Enrich the result with real tracker state so the frontend's
+    # DNS Analysis and Encrypted Traffic pages receive live data.
+    if result_data is not None:
+        pipeline = processor.processor.pipeline
+        result_data["dns"] = _serialize_dns_state(
+            pipeline.dns_tracker
+        )
+        result_data["encrypted"] = _serialize_encrypted_sessions(
+            pipeline.tls_tracker
+        )
+
+    return {
+        "running": running,
+        "interface": (
+            {
+                "name": interface.name,
+                "address": interface.address,
+                "display_name": interface.display_name,
+            }
+            if interface is not None
+            else None
+        ),
+        "captured": captured,
+        "processed": processed,
+        "dropped": dropped,
+        "elapsed_seconds": round(elapsed, 3),
+        "processing_duration_seconds": round(
+            processing_duration,
+            6,
+        ),
+        "packets_per_second": round(
+            packets_per_second,
+            2,
+        ),
+        "last_error": last_error,
+        "result": result_data,
+    }
+
+
+@app.get("/live/events")
+def live_events():
+    """
+    Return the latest processed live intelligence snapshot.
+
+    The frontend can poll this endpoint without requiring a
+    WebSocket connection.
+    """
+    with _live_lock:
+        result = _live_last_result
+
+    return {
+        "result": _serialize_live_result(result)
+    }
+
+
+@app.post("/live/stop")
+def live_stop():
+    with _live_lock:
+        running = (
+            _live_capture is not None
+            and _live_capture.running
+        )
+
+    if not running:
+        return {
+            "status": "already_stopped",
+            "running": False,
+        }
+
+    metrics = _stop_live_capture()
+
+    return {
+        "status": "stopped",
+        **metrics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PCAP REPLAY
+# ---------------------------------------------------------------------------
 
 @app.post("/replay")
 def replay():
@@ -240,27 +745,38 @@ def replay():
             detail="Test PCAP not found.",
         )
 
-    return _run_analysis(str(DATASET_PATH))
+    return _run_analysis(
+        str(DATASET_PATH)
+    )
 
+
+# ---------------------------------------------------------------------------
+# PCAP UPLOAD
+# ---------------------------------------------------------------------------
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: UploadFile = File(...),
+):
     """
     Accept a user-uploaded PCAP file, run the full
-    passive detection pipeline on it, and return the
-    intelligence report.
+    passive detection pipeline on it, and return
+    the intelligence report.
 
     The uploaded file is written to a temporary location,
-    processed, then deleted. The existing detection
-    pipeline is unchanged.
+    processed, then deleted.
     """
-    if not file.filename or not file.filename.endswith(".pcap"):
+    if (
+        not file.filename
+        or not file.filename.endswith(".pcap")
+    ):
         raise HTTPException(
             status_code=400,
             detail="Only .pcap files are supported.",
         )
 
     tmp_path = None
+
     try:
         contents = await file.read()
 
@@ -271,8 +787,13 @@ async def analyze(file: UploadFile = File(...)):
             tmp.write(contents)
             tmp_path = tmp.name
 
-        return _run_analysis(tmp_path)
+        return _run_analysis(
+            tmp_path
+        )
 
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if (
+            tmp_path
+            and os.path.exists(tmp_path)
+        ):
             os.remove(tmp_path)

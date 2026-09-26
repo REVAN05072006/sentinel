@@ -11,14 +11,21 @@ class DDoSDetector:
         syn_ratio_threshold: float = 0.8,
         source_count_threshold: int = 5,
         entropy_threshold: float = 2.0,
+        minimum_packets: int = 20,
+        minimum_syn_packets: int = 10,
     ):
         self.syn_rate_threshold = syn_rate_threshold
         self.syn_ratio_threshold = syn_ratio_threshold
         self.source_count_threshold = source_count_threshold
         self.entropy_threshold = entropy_threshold
+        self.minimum_packets = minimum_packets
+        self.minimum_syn_packets = minimum_syn_packets
 
     def detect(self, features: WindowFeatures) -> ThreatAlert | None:
-        if features.packet_count == 0:
+        if features.packet_count < self.minimum_packets:
+            return None
+
+        if features.syn_count < self.minimum_syn_packets:
             return None
 
         signals = 0
@@ -65,6 +72,7 @@ class DDoSDetector:
             ),
             "window_packets": features.packet_count,
             "window_bytes": features.byte_count,
+            "syn_count": features.syn_count,
         }
 
         return ThreatAlert(

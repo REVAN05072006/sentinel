@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from backend.alerts.schema import ThreatAlert
@@ -9,12 +9,17 @@ class ActiveAlert:
     """
     Represents one currently active threat alert.
 
-    Repeated detections of the same threat update this object
+    Repeated observations of the same threat update this object
     instead of creating duplicate analyst-facing alerts.
+
+    detection_count represents distinct detection episodes.
+    observation_count represents repeated detector evaluations
+    supporting the current active episode.
     """
 
     alert: ThreatAlert
     detection_count: int = 1
+    observation_count: int = 1
     first_seen: datetime | None = None
     last_seen: datetime | None = None
 
@@ -33,6 +38,9 @@ class AlertDeduplicator:
     Alerts are considered the same when their threat class,
     destination, destination port, and protocol match.
 
+    Repeated observations inside the active window do not create
+    additional detection episodes.
+
     The component is purely analytical and does not interact
     with the network.
     """
@@ -44,6 +52,9 @@ class AlertDeduplicator:
     def process(self, alert: ThreatAlert) -> ActiveAlert:
         """
         Process one detection and update or create an active alert.
+
+        A repeated observation inside the active window updates
+        the existing alert but does not increment detection_count.
         """
 
         key = self._alert_key(alert)
@@ -55,16 +66,19 @@ class AlertDeduplicator:
             ).total_seconds()
 
             if elapsed <= self.active_window:
-                existing.detection_count += 1
+                existing.observation_count += 1
                 existing.last_seen = alert.timestamp
                 existing.alert = self._merge_alert(
                     existing.alert,
                     alert,
                 )
+
                 return existing
 
         active_alert = ActiveAlert(
             alert=alert,
+            detection_count=1,
+            observation_count=1,
         )
 
         self._active[key] = active_alert

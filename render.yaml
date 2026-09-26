@@ -1,0 +1,22 @@
+# Render deployment configuration — Sentinel backend
+# https://render.com/docs/render-yaml
+#
+# IMPORTANT — Live capture limitation:
+# The /live/* endpoints (POST /live/start, GET /live/status, POST /live/stop)
+# require a local Npcap/libpcap interface and physical network hardware.
+# They will NOT perform packet capture in Render's cloud environment.
+# All other endpoints (/analyze, /replay, /status, /interfaces, /health)
+# work normally on Render.
+
+services:
+  - type: web
+    name: sentinel-backend
+    runtime: python
+    # Root of the repository is the sentinel/ directory.
+    # If this file is committed at the repo root, no rootDir override needed.
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.api.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      # PORT is injected automatically by Render — do not set it here.
