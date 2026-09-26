@@ -120,6 +120,51 @@ def _build_intelligence_response(final, metrics):
             }
         )
 
+    # Serialize active alert details for frontend consumption.
+    # The existing active_alerts integer count is preserved for
+    # backward compatibility with /status, /replay, and any other
+    # existing API consumers.  alert_details is the new array that
+    # the frontend Alerts Queue reads after PCAP analysis.
+    alert_details = []
+
+    for active_alert in final.active_alerts:
+        a = active_alert.alert
+
+        alert_details.append(
+            {
+                "timestamp": (
+                    a.timestamp.isoformat()
+                    if a.timestamp is not None
+                    else None
+                ),
+                "flow_id": (
+                    list(a.flow_id)
+                    if a.flow_id is not None
+                    else None
+                ),
+                "threat_class": a.threat_class,
+                "confidence": a.confidence,
+                "severity": a.severity,
+                "source_ip": a.source_ip,
+                "destination_ip": a.destination_ip,
+                "source_port": a.source_port,
+                "destination_port": a.destination_port,
+                "protocol": a.protocol,
+                "evidence": a.evidence,
+                "first_seen": (
+                    active_alert.first_seen.isoformat()
+                    if active_alert.first_seen is not None
+                    else None
+                ),
+                "last_seen": (
+                    active_alert.last_seen.isoformat()
+                    if active_alert.last_seen is not None
+                    else None
+                ),
+                "detection_count": active_alert.detection_count,
+            }
+        )
+
     return {
         "packets_processed": metrics.packets_processed,
         "replay_duration_seconds": metrics.replay_duration,
@@ -130,6 +175,7 @@ def _build_intelligence_response(final, metrics):
         "ml_anomaly_score": final.ml_anomaly_score,
         "ml_is_anomaly": final.ml_is_anomaly,
         "active_alerts": len(final.active_alerts),
+        "alert_details": alert_details,
         "correlated_chains": len(final.correlated_evidence),
         "intelligence": intelligence,
     }
