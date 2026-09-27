@@ -616,11 +616,11 @@ export const initialAlerts: AlertItem[] = [
     status: 'Active',
     deviationScore: '4.7σ above baseline',
     description: 'High-volume unidirectional UDP burst transmitting encrypted chunks across data diode interface without return ACK acknowledgment.',
-    evidence: [
-      'Traffic frequency increased 340% over baseline',
-      'Shannon entropy calculated at 7.98 bits/byte',
-      'Zero TCP ACK packets received (strictly unidirectional flow)'
-    ]
+    evidence: {
+      evidence_1: 'Traffic frequency increased 340% over baseline',
+      evidence_2: 'Shannon entropy calculated at 7.98 bits/byte',
+      evidence_3: 'Zero TCP ACK packets received (strictly unidirectional flow)'
+    }
   },
   {
     id: 'ALT-102',
@@ -634,11 +634,11 @@ export const initialAlerts: AlertItem[] = [
     status: 'Investigating',
     deviationScore: '5.2σ above baseline',
     description: 'Rapid sequential probe of air-gapped target ports 21 through 1024 within 12.4 seconds.',
-    evidence: [
-      'Destination port diversity exceeded anomaly threshold by 450%',
-      'Abnormal TCP header flags (SYN+ECE+URG)',
-      'Inter-packet delay standard deviation < 0.002s'
-    ]
+    evidence: {
+      evidence_1: 'Destination port diversity exceeded anomaly threshold by 450%',
+      evidence_2: 'Abnormal TCP header flags (SYN+ECE+URG)',
+      evidence_3: 'Inter-packet delay standard deviation < 0.002s'
+    }
   },
   {
     id: 'ALT-103',
@@ -652,11 +652,11 @@ export const initialAlerts: AlertItem[] = [
     status: 'Investigating',
     deviationScore: '3.8σ above baseline',
     description: 'Regular interval communication pattern characteristic of Cobalt Strike or Empire C2 beacon framework.',
-    evidence: [
-      'Periodic transmission rhythm with synthetic jitter (15s ± 200ms)',
-      'TLS SNI matches known malicious cluster',
-      'Unidirectional receiver buffer packet matches signature'
-    ]
+    evidence: {
+      evidence_1: 'Periodic transmission rhythm with synthetic jitter (15s ± 200ms)',
+      evidence_2: 'TLS SNI matches known malicious cluster',
+      evidence_3: 'Unidirectional receiver buffer packet matches signature'
+    }
   },
   {
     id: 'ALT-104',
@@ -670,10 +670,10 @@ export const initialAlerts: AlertItem[] = [
     status: 'Resolved',
     deviationScore: '4.1σ above baseline',
     description: 'Saturating half-open connection requests targeting internal web management interface.',
-    evidence: [
-      '98,000 packets transmitted within 1.2 seconds',
-      'Automated rate limiter triggered on interface diode-tx-fiber0'
-    ]
+    evidence: {
+      evidence_1: '98,000 packets transmitted within 1.2 seconds',
+      evidence_2: 'Automated rate limiter triggered on interface diode-tx-fiber0'
+    }
   },
   {
     id: 'ALT-105',
@@ -687,10 +687,10 @@ export const initialAlerts: AlertItem[] = [
     status: 'Active',
     deviationScore: '3.6σ above baseline',
     description: 'ICMP Echo Request payloads carrying obfuscated non-echo binary structures without echo replies.',
-    evidence: [
-      'Packet payload entropy 7.84 vs standard ICMP 1.20',
-      'Continuous egress stream with zero echo responses'
-    ]
+    evidence: {
+      evidence_1: 'Packet payload entropy 7.84 vs standard ICMP 1.20',
+      evidence_2: 'Continuous egress stream with zero echo responses'
+    }
   },
   {
     id: 'ALT-106',
@@ -704,10 +704,10 @@ export const initialAlerts: AlertItem[] = [
     status: 'Resolved',
     deviationScore: '2.8σ above baseline',
     description: 'Unusual inbound UDP 53 volume passing through optical tap sensor.',
-    evidence: [
-      'Amplification ratio 42:1 observed on response sizes',
-      'Traffic successfully filtered by border rule #442'
-    ]
+    evidence: {
+      evidence_1: 'Amplification ratio 42:1 observed on response sizes',
+      evidence_2: 'Traffic successfully filtered by border rule #442'
+    }
   }
 ];
 

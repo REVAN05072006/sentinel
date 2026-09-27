@@ -1696,18 +1696,7 @@ export const SecurityProvider: React.FC<{
           'Detection derived from passive packet and flow metadata.',
 
         evidence:
-          Object.entries(
-            alert.evidence || {},
-          ).map(
-            ([key, value]) =>
-              `${key}: ${
-                typeof value === 'object'
-                  ? JSON.stringify(
-                      value,
-                    )
-                  : String(value)
-              }`,
-          ),
+          alert.evidence || {},
       }),
     );
 
