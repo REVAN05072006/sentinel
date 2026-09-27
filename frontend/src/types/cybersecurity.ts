@@ -254,6 +254,7 @@ export interface PipelineSnapshot {
     scenario?: string;
     interface?: string;
     interface_name?: string;
+
     [key: string]: unknown;
   };
 
@@ -449,6 +450,13 @@ export interface MapEdge {
   [key: string]: unknown;
 }
 
+/*
+ * AlertItem is the frontend representation of a real BackendAlert.
+ *
+ * The backend fields below are preserved so the Alerts Queue
+ * does not lose source/destination ports, protocol, or the
+ * original evidence object while adapting data for the UI.
+ */
 export interface AlertItem {
   id: string;
 
@@ -460,6 +468,11 @@ export interface AlertItem {
 
   sourceIp: string;
   destinationIp: string;
+
+  sourcePort?: number | null;
+  destinationPort?: number | null;
+
+  protocol?: string;
 
   aiConfidence: number;
 
@@ -475,7 +488,7 @@ export interface AlertItem {
 
   description: string;
 
-  evidence: string[];
+  evidence: Record<string, unknown>;
 
   detectionCount?: number;
   flowId?: string;

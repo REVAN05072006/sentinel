@@ -209,7 +209,7 @@ export const FlowDrawer: React.FC<FlowDrawerProps> = ({ flow, onClose }) => {
           <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-2 font-sans">
             <button
               onClick={() => {
-                showToast('warning', 'Interface Quarantined', `Rule added to block traffic from ${flow.sourceIp}`);
+                showToast('info', 'Read-only posture', `Sentinel does not issue quarantine or block commands. This is an observation-only interface.`);
                 onClose();
               }}
               className="flex-1 py-2.5 px-3 rounded-lg bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/40 text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"

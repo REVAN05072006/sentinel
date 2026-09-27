@@ -1212,6 +1212,14 @@ export const SecurityProvider: React.FC<{
     [apiBase],
   );
 
+  /*
+   * Use a ref so refreshInterfaces never changes identity when
+   * selectedInterface changes. Previously this caused the useEffect
+   * below to re-register a new setInterval on every interface change.
+   */
+  const selectedInterfaceRef = useRef(selectedInterface);
+  selectedInterfaceRef.current = selectedInterface;
+
   const refreshInterfaces =
     useCallback(async () => {
       try {
@@ -1240,7 +1248,7 @@ export const SecurityProvider: React.FC<{
         setInterfaces(discovered);
 
         if (
-          !selectedInterface &&
+          !selectedInterfaceRef.current &&
           discovered.length > 0
         ) {
           setSelectedInterface(
@@ -1257,7 +1265,6 @@ export const SecurityProvider: React.FC<{
       }
     }, [
       apiBase,
-      selectedInterface,
     ]);
 
   const startStream = useCallback(

@@ -59,7 +59,7 @@ export const DashboardPage: React.FC = () => {
 
         <div className="flex gap-2">
           <button
-            onClick={() => startStream('demo')}
+            onClick={() => startStream('live')}
             className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold"
           >
             START LIVE CAPTURE
@@ -78,8 +78,8 @@ export const DashboardPage: React.FC = () => {
         <MetricCard
           title="Flow Groups"
           value={liveFlowCount.toLocaleString()}
-          change={connection.toUpperCase()}
-          changeType="positive"
+          change="vs last window"
+          changeType="neutral"
           icon={Activity}
           accentColor="cyan"
           sparklineData={[0]}
@@ -98,7 +98,7 @@ export const DashboardPage: React.FC = () => {
         <MetricCard
           title="Active Alerts"
           value={alerts.length.toString()}
-          change={sourceMode.toUpperCase()}
+          change={alerts.length ? `${alerts.length} active` : 'none active'}
           changeType={
             alerts.length
               ? 'negative'

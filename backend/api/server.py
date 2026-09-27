@@ -909,11 +909,14 @@ async def analyze(
     """
     if (
         not file.filename
-        or not file.filename.endswith(".pcap")
+        or not (
+            file.filename.endswith(".pcap")
+            or file.filename.endswith(".pcapng")
+        )
     ):
         raise HTTPException(
             status_code=400,
-            detail="Only .pcap files are supported.",
+            detail="Only .pcap and .pcapng files are supported.",
         )
 
     tmp_path = None
