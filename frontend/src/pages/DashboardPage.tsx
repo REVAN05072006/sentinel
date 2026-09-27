@@ -2,17 +2,14 @@ import React from 'react';
 import {
   Activity,
   ShieldAlert,
-  AlertTriangle,
   BrainCircuit,
   Radio,
   Database,
-  Layers3,
 } from 'lucide-react';
 import { MetricCard } from '../components/shared/MetricCard';
 import { TrafficAreaChart } from '../components/visualizations/TrafficAreaChart';
 import { ThreatDonutChart } from '../components/visualizations/ThreatDonutChart';
 import { useSecurity } from '../context/SecurityContext';
-import { SeverityBadge } from '../components/shared/Badge';
 
 export const DashboardPage: React.FC = () => {
   const {
@@ -33,7 +30,11 @@ export const DashboardPage: React.FC = () => {
   } = useSecurity();
 
   const risk = intelligence.length
-    ? Math.max(...intelligence.map((x) => x.unified_score))
+    ? Math.max(
+        ...intelligence.map(
+          (x) => x.unified_score,
+        ),
+      )
     : 0;
 
   return (
@@ -58,7 +59,7 @@ export const DashboardPage: React.FC = () => {
 
         <div className="flex gap-2">
           <button
-            onClick={() => startStream('live')}
+            onClick={() => startStream('demo')}
             className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold"
           >
             START LIVE CAPTURE
@@ -98,7 +99,11 @@ export const DashboardPage: React.FC = () => {
           title="Active Alerts"
           value={alerts.length.toString()}
           change={sourceMode.toUpperCase()}
-          changeType={alerts.length ? 'negative' : 'positive'}
+          changeType={
+            alerts.length
+              ? 'negative'
+              : 'positive'
+          }
           icon={ShieldAlert}
           accentColor="red"
           sparklineData={[0]}
@@ -117,8 +122,16 @@ export const DashboardPage: React.FC = () => {
                   : 'LOW'
           }
           icon={BrainCircuit}
-          accentColor={risk >= 0.7 ? 'red' : 'emerald'}
-          badge={mlIsAnomaly ? 'ANOMALY' : 'BASELINE'}
+          accentColor={
+            risk >= 0.7
+              ? 'red'
+              : 'emerald'
+          }
+          badge={
+            mlIsAnomaly
+              ? 'ANOMALY'
+              : 'BASELINE'
+          }
           sparklineData={[0]}
         />
       </div>
@@ -181,7 +194,8 @@ export const DashboardPage: React.FC = () => {
             </h3>
 
             <p className="text-xs text-slate-500">
-              Scenario: {scenario} · connection: {connection}
+              Scenario: {scenario} · connection:{' '}
+              {connection}
             </p>
           </div>
 
