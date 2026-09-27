@@ -70,6 +70,7 @@ _live_last_result: StreamingResult | None = None
 _live_last_error: str | None = None
 _live_packets_processed = 0
 _live_processing_duration = 0.0
+_live_is_demo = False  # True when running in PCAP-loop demo mode
 
 
 class LiveStartRequest(BaseModel):
@@ -415,22 +416,99 @@ def _reset_live_state() -> None:
     global _live_last_error
     global _live_packets_processed
     global _live_processing_duration
+    global _live_is_demo
 
     _live_last_result = None
     _live_last_error = None
     _live_packets_processed = 0
     _live_processing_duration = 0.0
+    _live_is_demo = False
 
 
-def _start_live_capture(interface: CaptureInterface) -> None:
+# ---------------------------------------------------------------------------
+# PCAP-LOOP DEMO WORKER (used when live capture is unavailable on cloud)
+# ---------------------------------------------------------------------------
+
+def _demo_worker_loop() -> None:
+    """
+    Feed packets from the bundled test PCAP into the live pipeline
+    in a continuous loop at approximately real-time speed.
+
+    This worker is started when Npcap / libpcap is not available
+    (e.g. cloud deployment). It reuses the same _live_lock,
+    _live_last_result, and _live_stop_event infrastructure as the
+    real live capture so that /live/status returns valid telemetry.
+    """
+    global _live_last_result
+    global _live_last_error
+    global _live_packets_processed
+    global _live_processing_duration
+
+    if not DATASET_PATH.exists():
+        with _live_lock:
+            _live_last_error = "Demo PCAP not found at datasets/test_traffic.pcap"
+        return
+
+    while not _live_stop_event.is_set():
+        try:
+            packets = list(PacketStream(str(DATASET_PATH)).packets())
+        except Exception as exc:
+            with _live_lock:
+                _live_last_error = f"PCAP read error: {exc}"
+            time.sleep(1.0)
+            continue
+
+        if not packets:
+            time.sleep(1.0)
+            continue
+
+        # Replay at approximately 10× real speed so the chart fills
+        # quickly on first load, then loops back for continuous data.
+        replay_speed = 10.0
+        prev_ts: float | None = None
+
+        for packet in packets:
+            if _live_stop_event.is_set():
+                return
+
+            if prev_ts is not None:
+                delay = (packet.timestamp - prev_ts) / replay_speed
+                if 0 < delay < 1.0:
+                    time.sleep(delay)
+
+            prev_ts = packet.timestamp
+
+            packet_start = time.perf_counter()
+
+            try:
+                result = processor.processor.process_packet(packet)
+                packet_end = time.perf_counter()
+
+                with _live_lock:
+                    _live_last_result = result
+                    _live_packets_processed += 1
+                    _live_processing_duration += packet_end - packet_start
+                    _live_last_error = None
+
+            except Exception as exc:
+                with _live_lock:
+                    _live_last_error = f"{type(exc).__name__}: {exc}"
+                continue
+
+        # Brief pause between loops so the chart shows continuous data.
+        time.sleep(0.5)
+
+
+def _start_live_capture(interface: CaptureInterface | None) -> None:
     global _live_capture
     global _live_worker
     global _live_interface
     global _live_started_at
+    global _live_is_demo
 
     with _live_lock:
 
-        if _live_capture is not None and _live_capture.running:
+        if _live_worker is not None and _live_worker.is_alive():
             raise HTTPException(
                 status_code=409,
                 detail="Live capture is already running.",
@@ -449,29 +527,40 @@ def _start_live_capture(interface: CaptureInterface) -> None:
         )
 
         _reset_live_state()
-
-        capture = LivePacketCapture(interface.name)
-
-        try:
-            capture.start()
-        except LiveCaptureError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=str(exc),
-            ) from exc
-
-        _live_capture = capture
-        _live_interface = interface
+        _live_stop_event.clear()
         _live_started_at = time.time()
 
-        _live_stop_event.clear()
+        if interface is not None:
+            capture = LivePacketCapture(interface.name)
+
+            try:
+                capture.start()
+                _live_capture = capture
+                _live_interface = interface
+                _live_is_demo = False
+
+                _live_worker = threading.Thread(
+                    target=_live_worker_loop,
+                    name="sentinel-live-worker",
+                    daemon=True,
+                )
+                _live_worker.start()
+                return
+
+            except LiveCaptureError:
+                # Fall through to demo mode below.
+                pass
+
+        # Demo mode: no interface / Npcap unavailable — loop the test PCAP.
+        _live_capture = None
+        _live_interface = interface  # may be None
+        _live_is_demo = True
 
         _live_worker = threading.Thread(
-            target=_live_worker_loop,
-            name="sentinel-live-worker",
+            target=_demo_worker_loop,
+            name="sentinel-demo-worker",
             daemon=True,
         )
-
         _live_worker.start()
 
 
@@ -529,8 +618,12 @@ def _stop_live_capture() -> dict:
 @app.on_event("startup")
 def startup():
     """
-    Initialize the ML baseline from trusted normal traffic before
-    replay or live processing begins.
+    Initialize the ML baseline and auto-start the PCAP-loop demo
+    worker so the dashboard displays real telemetry immediately after
+    deployment — even when Npcap / libpcap is not available.
+
+    On a local machine with Npcap the user can click START LIVE CAPTURE
+    to switch from the demo loop to real interface capture at any time.
     """
     processor.processor.fit_baseline(
         [
@@ -538,6 +631,14 @@ def startup():
             for index in range(30)
         ]
     )
+
+    # Start the demo loop in the background.  _start_live_capture(None)
+    # will always fall through to demo mode because no interface is given.
+    try:
+        _start_live_capture(None)
+    except Exception:
+        # If it already errored or a race happened, ignore silently.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -630,24 +731,26 @@ def live_start(request: LiveStartRequest):
         None,
     )
 
-    if selected is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Capture interface '{request.interface}' "
-                "was not found."
-            ),
-        )
-
+    # If the requested interface was not found (e.g. cloud deployment
+    # where Npcap is unavailable), fall back to PCAP-loop demo mode
+    # rather than refusing with a 404.
     _start_live_capture(selected)
+
+    with _live_lock:
+        demo = _live_is_demo
 
     return {
         "status": "started",
-        "interface": {
-            "name": selected.name,
-            "address": selected.address,
-            "display_name": selected.display_name,
-        },
+        "demo_mode": demo,
+        "interface": (
+            {
+                "name": selected.name,
+                "address": selected.address,
+                "display_name": selected.display_name,
+            }
+            if selected is not None
+            else None
+        ),
         "mode": "passive",
         "payload_decryption": False,
         "active_mitigation": False,
@@ -659,7 +762,16 @@ def live_status():
     with _live_lock:
 
         capture = _live_capture
+        worker = _live_worker
+        demo = _live_is_demo
 
+        # Worker running = either real capture OR demo loop is alive.
+        worker_running = (
+            worker is not None
+            and worker.is_alive()
+        )
+
+        # "running" in the original sense: real Npcap capture active.
         running = (
             capture is not None
             and capture.running
@@ -721,7 +833,9 @@ def live_status():
         )
 
     return {
-        "running": running,
+        "running": running or demo,
+        "demo_mode": demo,
+        "worker_running": worker_running,
         "interface": (
             {
                 "name": interface.name,

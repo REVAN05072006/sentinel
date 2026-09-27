@@ -1136,11 +1136,8 @@ export const SecurityProvider: React.FC<{
         }
 
         setBackendOnline(true);
-
         setSourceMode('live');
-
         setConnectionSafe('capturing');
-
         setActivePage('dashboard');
 
         /*
@@ -1154,11 +1151,25 @@ export const SecurityProvider: React.FC<{
             pollLiveStatus();
           }, 1000);
 
-        showToast(
-          'success',
-          'Live capture started',
-          `Sentinel is passively monitoring ${interfaceName}.`,
-        );
+        // Check whether backend fell back to PCAP-loop demo mode
+        // (happens on cloud deployments where Npcap is unavailable).
+        const isDemo =
+          (data as unknown as Record<string, unknown>)?.demo_mode === true;
+
+        if (isDemo) {
+          showToast(
+            'info',
+            'Demo stream active',
+            'Live capture is unavailable in this environment. ' +
+              'Running bundled PCAP demo stream instead.',
+          );
+        } else {
+          showToast(
+            'success',
+            'Live capture started',
+            `Sentinel is passively monitoring ${interfaceName}.`,
+          );
+        }
       } catch (error) {
         clearLivePolling();
 
@@ -1605,6 +1616,44 @@ export const SecurityProvider: React.FC<{
   }, [
     refreshInterfaces,
     refreshStatus,
+  ]);
+
+  /*
+   * Auto-start polling /live/status on mount.
+   *
+   * The backend starts a demo PCAP-loop worker on startup, so
+   * the dashboard receives live telemetry immediately without
+   * requiring the user to click START LIVE CAPTURE.
+   * We wait 2 s to give the backend time to boot the worker.
+   */
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await fetch(`${apiBase}/live/status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        // If the backend worker is already running (demo or real),
+        // start polling so the dashboard fills immediately.
+        if (data?.running || data?.worker_running || data?.demo_mode) {
+          setSourceMode('live');
+          setConnectionSafe('capturing');
+          await pollLiveStatus();
+          livePollRef.current = window.setInterval(() => {
+            pollLiveStatus();
+          }, 1000);
+        }
+      } catch {
+        // Backend not ready yet — user can click the button manually.
+      }
+    }, 2000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    apiBase,
+    pollLiveStatus,
+    setConnectionSafe,
   ]);
 
   /*
