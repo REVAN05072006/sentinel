@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.features.dns_features import DNSFeatureExtractor
@@ -37,6 +39,7 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,7 +126,7 @@ def _build_intelligence_response(final, metrics):
     # Serialize active alert details for frontend consumption.
     # The existing active_alerts integer count is preserved for
     # backward compatibility with /status, /replay, and any other
-    # existing API consumers.  alert_details is the new array that
+    # existing API consumers. alert_details is the new array that
     # the frontend Alerts Queue reads after PCAP analysis.
     alert_details = []
 
@@ -212,10 +215,10 @@ def _serialize_live_result(result: StreamingResult | None):
 
 def _serialize_dns_state(dns_tracker: DNSTracker) -> dict:
     """
-    Flatten all observed DNS query groups into a list of DnsRecord-
-    compatible dicts for the frontend DNS Analysis page.
+    Flatten all observed DNS query groups into a list of
+    DnsRecord-compatible dicts for the frontend DNS Analysis page.
 
-    Only real observed metadata is returned.  Nothing is fabricated.
+    Only real observed metadata is returned. Nothing is fabricated.
     """
     recent_queries: list[dict] = []
 
@@ -706,11 +709,15 @@ def live_status():
     # DNS Analysis and Encrypted Traffic pages receive live data.
     if result_data is not None:
         pipeline = processor.processor.pipeline
+
         result_data["dns"] = _serialize_dns_state(
             pipeline.dns_tracker
         )
-        result_data["encrypted"] = _serialize_encrypted_sessions(
-            pipeline.tls_tracker
+
+        result_data["encrypted"] = (
+            _serialize_encrypted_sessions(
+                pipeline.tls_tracker
+            )
         )
 
     return {
@@ -794,6 +801,94 @@ def replay():
     return _run_analysis(
         str(DATASET_PATH)
     )
+
+
+# ---------------------------------------------------------------------------
+# REPLAY TELEMETRY
+# ---------------------------------------------------------------------------
+
+@app.get("/replay/stream")
+def replay_stream():
+    """
+    Return the real Sentinel telemetry series generated from
+    the bundled test PCAP.
+
+    This endpoint uses the same passive detection pipeline as
+    /replay, but exposes every intermediate WindowFeatures result
+    so the frontend can populate its traffic history graph.
+
+    No synthetic traffic values are generated.
+    No packets are transmitted.
+    """
+    if not DATASET_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Test PCAP not found.",
+        )
+
+    # Start from a clean analytical state.
+    processor.processor.reset()
+
+    # Establish the same trusted ML baseline used by /replay
+    # and /live/start.
+    processor.processor.fit_baseline(
+        [
+            make_normal_window(index)
+            for index in range(30)
+        ]
+    )
+
+    packets = list(
+        PacketStream(DATASET_PATH).packets()
+    )
+
+    results, metrics = processor.replay(
+        packets,
+        mode="maximum",
+    )
+
+    if not results:
+        raise HTTPException(
+            status_code=400,
+            detail="No packets found in PCAP.",
+        )
+
+    points = []
+
+    for result in results:
+        window = result.window_features
+
+        if window is None:
+            continue
+
+        points.append(
+            {
+                "timestamp": result.packet_timestamp,
+                "pps": window.packets_per_second,
+                "bps": window.bytes_per_second,
+                "syn": window.syns_per_second,
+                "packet_count": window.packet_count,
+                "byte_count": window.byte_count,
+                "ml_anomaly_score": (
+                    result.ml_anomaly_score
+                ),
+                "ml_is_anomaly": (
+                    result.ml_is_anomaly
+                ),
+            }
+        )
+
+    final = results[-1]
+
+    analysis = _build_intelligence_response(
+        final,
+        metrics,
+    )
+
+    return {
+        **analysis,
+        "points": points,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1272,17 +1272,13 @@ export const SecurityProvider: React.FC<{
       }
 
       try {
+        setTrafficHistory([]);
+
         const response = await fetch(
-          `${apiBase}/replay`,
+          `${apiBase}/replay/stream`,
           {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              mode: 'accelerated',
-              scenario,
-            }),
+            method: 'GET',
+            cache: 'no-store',
           },
         );
 
@@ -1293,20 +1289,58 @@ export const SecurityProvider: React.FC<{
         }
 
         const data =
-          (await response.json()) as BackendAnalysisResponse;
+          (await response.json()) as BackendAnalysisResponse & {
+            points?: Array<{
+              timestamp?: number;
+              pps?: number;
+              bps?: number;
+              syn?: number;
+              packet_count?: number;
+              byte_count?: number;
+              ml_anomaly_score?: number;
+              ml_is_anomaly?: boolean;
+            }>;
+          };
 
         consume(data);
 
+        const points = Array.isArray(data.points)
+          ? data.points
+          : [];
+
+        const history: TrafficHistoryPoint[] = points.map(
+          (point) => ({
+            time:
+              point.timestamp !== undefined
+                ? new Date(
+                    point.timestamp * 1000,
+                  ).toISOString()
+                : new Date().toISOString(),
+            pps: numberValue(point.pps),
+            bps: numberValue(point.bps),
+            syn: numberValue(point.syn),
+            anomaly: numberValue(
+              point.ml_anomaly_score,
+            ),
+          }),
+        );
+
+        setTrafficHistory(history.slice(-120));
         setConnectionSafe('complete');
 
         showToast(
           'success',
           'Sentinel analysis complete',
           `${numberValue(
-            data.metrics?.packets_processed,
+            data.packets_processed,
           )} packets processed.`,
         );
       } catch (error) {
+        console.error(
+          'Sentinel replay stream failed:',
+          error,
+        );
+
         setConnectionSafe('error');
 
         showToast(
@@ -1321,7 +1355,6 @@ export const SecurityProvider: React.FC<{
     [
       apiBase,
       consume,
-      scenario,
       setConnectionSafe,
       showToast,
       sourceMode,
